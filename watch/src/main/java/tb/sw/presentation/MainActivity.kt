@@ -3,10 +3,14 @@
 package tb.sw.presentation
 
 import android.Manifest
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -49,26 +53,43 @@ import tb.sw.WatchStats
 
 /**
  * Eight-page horizontal pager dashboard surfacing every Samsung Health
- * Sensor SDK data type:
- *
- *   0 — Status (link, session, battery)
- *   1 — PPG raw (GREEN/RED/IR)
- *   2 — Heart rate + IBI
- *   3 — Motion (ACC, skin temperature)
- *   4 — EDA + SpO2
- *   5 — ECG + Sweat loss
- *   6 — BIA + MF-BIA
- *   7 — BLE bandwidth + counters
- *
- * Auto-scaling layout works on Galaxy Watch 8 40 mm (432 dp), 44 mm (480 dp),
- * and any other round Wear OS screen.
+ * Sensor SDK data type. Lifecycle-aware: while this Activity is in the
+ * foreground (onResume → onPause), it holds a streaming reference on the
+ * service so live values flow even when no BLE central is connected.
+ * When the screen sleeps or the user leaves the dashboard, the reference
+ * is released — the service keeps streaming only if a BLE central is
+ * actively subscribed.
  */
 class MainActivity : ComponentActivity() {
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
-        if (result.values.all { it }) startStreamService()
+        if (result.values.all { it }) {
+            startStreamService()
+            bindToService()
+        }
+    }
+
+    private var binder: SensorStreamService.LocalBinder? = null
+    private var bound: Boolean = false
+    private var uiAcquired: Boolean = false
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            binder = service as? SensorStreamService.LocalBinder
+            bound = true
+            // If the activity is currently in the foreground when the service
+            // finally connects (which can happen on a cold start), grab the
+            // reference now so live values start flowing.
+            maybeAcquireUi()
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            binder = null
+            bound = false
+            uiAcquired = false
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -79,6 +100,43 @@ class MainActivity : ComponentActivity() {
         }
         setContent { Dashboard() }
         ensurePermissionsAndStart()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (bound || binder == null) bindToService()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Activity is visible — request live sensor values.
+        maybeAcquireUi()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Activity is no longer visible — release the UI reference. If a BLE
+        // central is also subscribed, the service keeps streaming; otherwise
+        // the trackers stop.
+        if (uiAcquired) {
+            binder?.releaseUi()
+            uiAcquired = false
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (bound) {
+            runCatching { unbindService(serviceConnection) }
+            bound = false
+            binder = null
+        }
+    }
+
+    private fun maybeAcquireUi() {
+        if (!uiAcquired) {
+            binder?.acquireUi()?.also { uiAcquired = true }
+        }
     }
 
     private fun ensurePermissionsAndStart() {
@@ -92,8 +150,10 @@ class MainActivity : ComponentActivity() {
         val missing = needed.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (missing.isEmpty()) startStreamService()
-        else permissionLauncher.launch(missing.toTypedArray())
+        if (missing.isEmpty()) {
+            startStreamService()
+            bindToService()
+        } else permissionLauncher.launch(missing.toTypedArray())
     }
 
     private fun startStreamService() {
@@ -101,6 +161,11 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
         } else startService(intent)
+    }
+
+    private fun bindToService() {
+        val intent = Intent(this, SensorStreamService::class.java)
+        bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
     }
 }
 
@@ -209,7 +274,7 @@ private fun StatusPage(s: WatchStats.Snapshot) {
             if (s.gattConnections > 0) Color(0xFF66BB6A) else Color.Gray)
         StatRow("SUBS", "${s.gattSubscribers}",
             if (s.gattSubscribers > 0) Color(0xFF66BB6A) else Color.Gray)
-        StatRow("STREAM", if (s.streaming) "ON" else "off",
+        StatRow("STREAM", if (s.streaming) "ON (${s.streamOwners})" else "off",
             if (s.streaming) Color(0xFF66BB6A) else Color.Gray)
         StatRow("MEASURE", s.activeMeasurement,
             if (s.activeMeasurement != "—") Color(0xFFFFA726) else Color.Gray)

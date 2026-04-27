@@ -29,7 +29,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 /**
  * Samsung Health Sensor SDK wrapper — exposes all ten data types.
  *
- *   Continuous trackers (start with [startContinuous] when phone requests
+ *   Continuous trackers (acquired via [acquire]/[release] reference counting):
  *   streaming):
  *     - PPG raw (GREEN/RED/IR)
  *     - Heart rate continuous (with IBI list)
@@ -67,6 +67,17 @@ class SamsungSensorBridge(private val context: Context) {
     private var tempTracker: HealthTracker? = null
     private var edaTracker: HealthTracker? = null
     @Volatile private var continuousStarted: Boolean = false
+
+    /**
+     * Reference counting for the continuous trackers. Multiple owners can
+     * request streaming simultaneously — UI when its screen is visible, the
+     * BLE service when a central has issued START_STREAM. Trackers stay on
+     * while at least one owner holds a reference, and shut down when the
+     * last owner releases. This avoids stopping the sensors when only one
+     * of them goes away (e.g. screen off, but a phone is still subscribed).
+     */
+    private val owners = mutableSetOf<String>()
+    private val ownersLock = Any()
 
     // On-demand trackers (active only during a measurement window)
     private var ecgTracker: HealthTracker? = null
@@ -157,16 +168,49 @@ class SamsungSensorBridge(private val context: Context) {
     }
 
     fun disconnect() {
-        stopContinuous()
+        synchronized(ownersLock) {
+            owners.clear()
+            stopContinuousInternal()
+        }
         stopAllOnDemand()
         runCatching { trackingService?.disconnectService() }
         trackingService = null
         mode = Mode.Disconnected
     }
 
-    // -- Continuous trackers -----------------------------------------------
+    // -- Continuous trackers (reference-counted) ---------------------------
 
-    fun startContinuous() {
+    /**
+     * Acquire a streaming reference for the given tag. Idempotent per tag —
+     * calling acquire("ui") twice still counts as a single owner. If this
+     * is the first acquisition, the trackers start; otherwise it's free.
+     */
+    fun acquire(tag: String) {
+        synchronized(ownersLock) {
+            val wasEmpty = owners.isEmpty()
+            owners += tag
+            WatchStats.update { copy(streamOwners = owners.size) }
+            if (wasEmpty) startContinuousInternal()
+        }
+    }
+
+    /**
+     * Release the reference held by [tag]. If this was the last owner,
+     * the trackers stop. Safe to call when not held — no-op.
+     */
+    fun release(tag: String) {
+        synchronized(ownersLock) {
+            if (!owners.remove(tag)) return
+            WatchStats.update { copy(streamOwners = owners.size) }
+            if (owners.isEmpty()) stopContinuousInternal()
+        }
+    }
+
+    /** True iff at least one owner is currently holding a reference. */
+    val isStreaming: Boolean
+        get() = synchronized(ownersLock) { owners.isNotEmpty() }
+
+    private fun startContinuousInternal() {
         if (continuousStarted) return
         val service = trackingService ?: return
         if (mode != Mode.Connected) return
@@ -197,7 +241,7 @@ class SamsungSensorBridge(private val context: Context) {
         Log.i(TAG, "Continuous trackers started")
     }
 
-    fun stopContinuous() {
+    private fun stopContinuousInternal() {
         if (!continuousStarted) return
         listOf(ppgTracker, hrTracker, accTracker, tempTracker, edaTracker)
             .forEach { runCatching { it?.unsetEventListener() } }

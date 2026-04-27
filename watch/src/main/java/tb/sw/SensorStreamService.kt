@@ -7,6 +7,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -26,11 +27,17 @@ import kotlinx.coroutines.launch
  * Long-running foreground service. Owns the Samsung sensor bridge and the GATT
  * server; routes SDK callbacks to BLE notifications.
  *
- * Continuous streams (PPG/HR/ACC/Temp/EDA) flow whenever streaming is on. The
- * five on-demand measurements (ECG/BIA/MF-BIA/SpO2/SweatLoss) flow whenever
- * the corresponding measurement is active — they don't depend on streaming
- * state, so the user can fire an SpO2 reading without enabling continuous
- * streaming first.
+ * Continuous streams (PPG/HR/ACC/Temp/EDA) flow whenever at least one owner
+ * holds a streaming reference. Two owners exist:
+ *   - `"ui"` — held while the dashboard Activity is in the foreground.
+ *   - `"ble"` — held between BLE central START_STREAM and STOP_STREAM commands.
+ *
+ * Either is sufficient — sensors run while the user is looking, while a phone
+ * is subscribed, or both. They stop only when both have released.
+ *
+ * On-demand measurements (ECG/BIA/MF-BIA/SpO2/SweatLoss) are independent of
+ * this reference count: they fire when their command arrives, regardless of
+ * UI state, and produce a one-shot result.
  */
 class SensorStreamService : Service() {
 
@@ -38,14 +45,23 @@ class SensorStreamService : Service() {
         const val TAG = "SensorStreamService"
         const val CHANNEL_ID = "tbwatchsensors_stream"
         const val NOTIFICATION_ID = 42
+        const val OWNER_BLE = "ble"
+        const val OWNER_UI = "ui"
     }
+
+    /** Returned to the Activity when it binds. UI uses this to acquire/release. */
+    inner class LocalBinder : Binder() {
+        fun acquireUi() = bridge.acquire(OWNER_UI)
+        fun releaseUi() = bridge.release(OWNER_UI)
+    }
+
+    private val binder = LocalBinder()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private lateinit var bridge: SamsungSensorBridge
     private lateinit var gatt: SensorGattServer
     private var wakeLock: PowerManager.WakeLock? = null
 
-    @Volatile private var streaming = false
     @Volatile private var sessionId: Int = 0
     private var continuousJob: Job? = null
     private var ondemandJob: Job? = null
@@ -71,8 +87,10 @@ class SensorStreamService : Service() {
         bridge.connect()
         gatt.start()
 
-        // On-demand results always flow (independently of streaming flag) so a
-        // measurement triggered while streaming is off still reaches the central.
+        // Continuous fanout always runs — it's a no-op when nothing is in
+        // the flow channels, and starts delivering as soon as a tracker
+        // activates (which happens when someone calls acquire()).
+        startContinuousFanout()
         startOnDemandFanout()
 
         // Periodic status push.
@@ -89,7 +107,7 @@ class SensorStreamService : Service() {
             while (true) {
                 delay(1_000)
                 val uptime = (System.currentTimeMillis() - startMs) / 1000
-                val isStreaming = streaming
+                val isStreaming = bridge.isStreaming
                 val currentSession = sessionId
                 val dropped = bridge.droppedPackets
                 val battery = readBatteryPercent().toInt() and 0xFF
@@ -102,6 +120,9 @@ class SensorStreamService : Service() {
                         batteryPct = battery,
                     )
                 }
+                // Update the notification text so the OS shows the current state.
+                val notifText = if (isStreaming) "Streaming" else "Idle"
+                runCatching { startForeground(NOTIFICATION_ID, buildNotification(notifText)) }
             }
         }
     }
@@ -130,7 +151,7 @@ class SensorStreamService : Service() {
         } else 0
         if (type != 0) {
             startForeground(NOTIFICATION_ID,
-                buildNotification(if (streaming) "Streaming" else "Idle"), type)
+                buildNotification(if (bridge.isStreaming) "Streaming" else "Idle"), type)
         }
         return START_STICKY
     }
@@ -146,14 +167,14 @@ class SensorStreamService : Service() {
         scope.cancel()
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(intent: Intent?): IBinder = binder
 
     // -- Command handling ---------------------------------------------------
 
     private fun handleCommand(cmd: Byte) {
         when (cmd) {
-            SensorProtocol.CMD_START_STREAM -> startStreaming()
-            SensorProtocol.CMD_STOP_STREAM -> stopStreaming()
+            SensorProtocol.CMD_START_STREAM -> bleStart()
+            SensorProtocol.CMD_STOP_STREAM  -> bleStop()
             SensorProtocol.CMD_MEASURE_ECG -> bridge.startEcgMeasurement()
             SensorProtocol.CMD_MEASURE_BIA -> bridge.startBiaMeasurement()
             SensorProtocol.CMD_MEASURE_MFBIA -> bridge.startMfBiaMeasurement()
@@ -169,15 +190,20 @@ class SensorStreamService : Service() {
         }
     }
 
-    // -- Continuous streams -------------------------------------------------
-
-    private fun startStreaming() {
-        if (streaming) return
-        streaming = true
+    private fun bleStart() {
         sessionId++
+        bridge.acquire(OWNER_BLE)
+        Log.i(TAG, "BLE central started streaming, session=$sessionId")
+    }
 
-        bridge.startContinuous()
+    private fun bleStop() {
+        bridge.release(OWNER_BLE)
+        Log.i(TAG, "BLE central stopped streaming")
+    }
 
+    // -- Fanout: bridge → BLE notifications --------------------------------
+
+    private fun startContinuousFanout() {
         continuousJob = scope.launch {
             launch { bridge.ppgFlow.collectLatest { gatt.notifyPpg(it.toBytes()) } }
             launch { bridge.hrFlow.collectLatest { gatt.notifyHr(it.toBytes()) } }
@@ -185,22 +211,7 @@ class SensorStreamService : Service() {
             launch { bridge.tempFlow.collectLatest { gatt.notifyTemp(it.toBytes()) } }
             launch { bridge.edaFlow.collectLatest { gatt.notifyEda(it.toBytes()) } }
         }
-
-        startForeground(NOTIFICATION_ID, buildNotification("Streaming"))
-        Log.i(TAG, "streaming started, session=$sessionId")
     }
-
-    private fun stopStreaming() {
-        if (!streaming) return
-        streaming = false
-        continuousJob?.cancel()
-        continuousJob = null
-        bridge.stopContinuous()
-        startForeground(NOTIFICATION_ID, buildNotification("Idle"))
-        Log.i(TAG, "streaming stopped")
-    }
-
-    // -- On-demand result fanout (always on) -------------------------------
 
     private fun startOnDemandFanout() {
         ondemandJob = scope.launch {
@@ -228,7 +239,7 @@ class SensorStreamService : Service() {
             sessionId = sessionId,
             droppedPackets = bridge.droppedPackets.coerceAtMost(Short.MAX_VALUE.toInt()).toShort(),
             batteryPercent = battery,
-            streaming = streaming,
+            streaming = bridge.isStreaming,
             sampleRateHz = 25,
             activeMeasurement = active,
         )

@@ -24,6 +24,7 @@ object WatchStats {
         val gattSubscribers: Int = 0,
         val gattConnections: Int = 0,
         val streaming: Boolean = false,
+        val streamOwners: Int = 0,
         val activeMeasurement: String = "—",
 
         // Continuous: PPG
