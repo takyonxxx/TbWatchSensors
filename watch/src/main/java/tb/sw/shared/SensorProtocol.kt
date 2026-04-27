@@ -48,6 +48,14 @@ object SensorProtocol {
     val CHAR_SPO2_UUID:       UUID = uuid("7b1d000c")
     val CHAR_SWEAT_UUID:      UUID = uuid("7b1d000d")
 
+    // -- Standard Android sensors (not in Samsung SDK) ---------------------
+
+    val CHAR_GYRO_UUID:       UUID = uuid("7b1d000e")
+    val CHAR_MAG_UUID:        UUID = uuid("7b1d000f")
+    val CHAR_BARO_UUID:       UUID = uuid("7b1d0010")
+    val CHAR_LIGHT_UUID:      UUID = uuid("7b1d0011")
+    val CHAR_GPS_UUID:        UUID = uuid("7b1d0012")
+
     /** Standard CCCD; clients write 0x01 0x00 to enable notifications. */
     val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
@@ -99,6 +107,13 @@ object SensorProtocol {
     const val MFBIA_PACKET_SIZE    = 44
     const val SPO2_PACKET_SIZE     = 16    // ts + status + spo2 + hr
     const val SWEAT_PACKET_SIZE    = 12
+
+    // Standard Android sensors
+    const val GYRO_PACKET_SIZE     = 16    // ts + xyz floats (rad/s)
+    const val MAG_PACKET_SIZE      = 16    // ts + xyz floats (µT)
+    const val BARO_PACKET_SIZE     = 12    // ts + pressure_hpa + altitude_m
+    const val LIGHT_PACKET_SIZE    = 8     // ts + lux float
+    const val GPS_PACKET_SIZE      = 40    // ts + lat/lon (double) + alt/speed/bearing/acc + satellites + fixed
 
     // -- Packets: continuous streams ---------------------------------------
 
@@ -352,6 +367,135 @@ object SensorProtocol {
                 require(b.size >= SWEAT_PACKET_SIZE)
                 val bb = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN)
                 return SweatPacket(bb.int, bb.int, bb.float)
+            }
+        }
+    }
+
+    // -- Packets: standard Android sensors ---------------------------------
+
+    /** Gyroscope angular rate, rad/s on each axis. */
+    data class GyroPacket(
+        val timestampMs: Int,
+        val x: Float, val y: Float, val z: Float,
+    ) {
+        fun toBytes(): ByteArray =
+            ByteBuffer.allocate(GYRO_PACKET_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(timestampMs).putFloat(x).putFloat(y).putFloat(z).array()
+
+        companion object {
+            fun fromBytes(b: ByteArray): GyroPacket {
+                require(b.size >= GYRO_PACKET_SIZE)
+                val bb = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN)
+                return GyroPacket(bb.int, bb.float, bb.float, bb.float)
+            }
+        }
+    }
+
+    /** Geomagnetic field strength, µT on each axis. */
+    data class MagnetometerPacket(
+        val timestampMs: Int,
+        val x: Float, val y: Float, val z: Float,
+    ) {
+        fun toBytes(): ByteArray =
+            ByteBuffer.allocate(MAG_PACKET_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(timestampMs).putFloat(x).putFloat(y).putFloat(z).array()
+
+        companion object {
+            fun fromBytes(b: ByteArray): MagnetometerPacket {
+                require(b.size >= MAG_PACKET_SIZE)
+                val bb = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN)
+                return MagnetometerPacket(bb.int, bb.float, bb.float, bb.float)
+            }
+        }
+    }
+
+    /**
+     * Barometric pressure (hPa) plus altitude derived from standard
+     * atmosphere (m). Altitude is approximate — for higher accuracy
+     * the consumer should calibrate against a known reference pressure.
+     */
+    data class BarometerPacket(
+        val timestampMs: Int,
+        val pressureHpa: Float,
+        val altitudeM: Float,
+    ) {
+        fun toBytes(): ByteArray =
+            ByteBuffer.allocate(BARO_PACKET_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(timestampMs).putFloat(pressureHpa).putFloat(altitudeM).array()
+
+        companion object {
+            fun fromBytes(b: ByteArray): BarometerPacket {
+                require(b.size >= BARO_PACKET_SIZE)
+                val bb = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN)
+                return BarometerPacket(bb.int, bb.float, bb.float)
+            }
+        }
+    }
+
+    /** Ambient light level in lux. */
+    data class LightPacket(
+        val timestampMs: Int,
+        val lux: Float,
+    ) {
+        fun toBytes(): ByteArray =
+            ByteBuffer.allocate(LIGHT_PACKET_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(timestampMs).putFloat(lux).array()
+
+        companion object {
+            fun fromBytes(b: ByteArray): LightPacket {
+                require(b.size >= LIGHT_PACKET_SIZE)
+                val bb = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN)
+                return LightPacket(bb.int, bb.float)
+            }
+        }
+    }
+
+    /**
+     * GNSS / GPS fix. Coordinates in degrees as doubles for cm-level precision.
+     * Speed in m/s (multiply by 3.6 for km/h), bearing in degrees clockwise from
+     * magnetic north (0–360), accuracy in metres (1σ horizontal radius).
+     */
+    data class GpsPacket(
+        val timestampMs: Int,
+        val latitudeDeg: Double,
+        val longitudeDeg: Double,
+        val altitudeM: Float,
+        val speedMps: Float,
+        val bearingDeg: Float,
+        val accuracyM: Float,
+        val satellitesUsed: Int,
+        val fixed: Boolean,
+    ) {
+        fun toBytes(): ByteArray {
+            val bb = ByteBuffer.allocate(GPS_PACKET_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+            bb.putInt(timestampMs)
+            bb.putDouble(latitudeDeg)
+            bb.putDouble(longitudeDeg)
+            bb.putFloat(altitudeM)
+            bb.putFloat(speedMps)
+            bb.putFloat(bearingDeg)
+            bb.putFloat(accuracyM)
+            bb.putShort(satellitesUsed.coerceAtMost(Short.MAX_VALUE.toInt()).toShort())
+            bb.put(if (fixed) 1.toByte() else 0.toByte())
+            bb.put(0.toByte()) // pad
+            return bb.array()
+        }
+
+        companion object {
+            fun fromBytes(b: ByteArray): GpsPacket {
+                require(b.size >= GPS_PACKET_SIZE)
+                val bb = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN)
+                return GpsPacket(
+                    timestampMs = bb.int,
+                    latitudeDeg = bb.double,
+                    longitudeDeg = bb.double,
+                    altitudeM = bb.float,
+                    speedMps = bb.float,
+                    bearingDeg = bb.float,
+                    accuracyM = bb.float,
+                    satellitesUsed = bb.short.toInt() and 0xFFFF,
+                    fixed = bb.get() == 1.toByte(),
+                )
             }
         }
     }

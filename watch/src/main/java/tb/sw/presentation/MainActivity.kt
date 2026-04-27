@@ -30,6 +30,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.clickable
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
@@ -50,6 +52,7 @@ import androidx.wear.compose.material.MaterialTheme
 import androidx.wear.compose.material.Text
 import tb.sw.SensorStreamService
 import tb.sw.WatchStats
+import tb.sw.vario.VarioState
 
 /**
  * Eight-page horizontal pager dashboard surfacing every Samsung Health
@@ -147,6 +150,11 @@ class MainActivity : ComponentActivity() {
             needed += Manifest.permission.BLUETOOTH_SCAN
         }
         needed += Manifest.permission.BODY_SENSORS
+        // Request both — Android 12+ shows a "precise vs approximate" toggle.
+        // We need FINE for GPS; COARSE alone is insufficient. Asking for both
+        // makes the toggle default to precise.
+        needed += Manifest.permission.ACCESS_FINE_LOCATION
+        needed += Manifest.permission.ACCESS_COARSE_LOCATION
         val missing = needed.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
@@ -207,20 +215,23 @@ private fun Dashboard() {
         CompositionLocalProvider(LocalScale provides scale) {
             MaterialTheme {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    val pagerState = rememberPagerState(pageCount = { 8 })
+                    val pagerState = rememberPagerState(pageCount = { 11 })
                     HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
                         when (page) {
                             0 -> StatusPage(stats)
-                            1 -> PpgPage(stats)
-                            2 -> HeartPage(stats)
-                            3 -> MotionPage(stats)
-                            4 -> EdaSpO2Page(stats)
-                            5 -> EcgSweatPage(stats)
-                            6 -> BiaPage(stats)
-                            7 -> BlePage(stats)
+                            1 -> VarioPage()
+                            2 -> PpgPage(stats)
+                            3 -> HeartPage(stats)
+                            4 -> MotionPage(stats)
+                            5 -> EdaSpO2Page(stats)
+                            6 -> EcgSweatPage(stats)
+                            7 -> BiaPage(stats)
+                            8 -> AmbientPage(stats)
+                            9 -> GpsPage(stats)
+                            10 -> BlePage(stats)
                         }
                     }
-                    PageIndicator(pagerState.currentPage, total = 8)
+                    PageIndicator(pagerState.currentPage, total = 11)
                 }
             }
         }
@@ -285,7 +296,92 @@ private fun StatusPage(s: WatchStats.Snapshot) {
     }
 }
 
-// -- Page 1: PPG -------------------------------------------------------------
+// -- Page 1: Variometer (paragliding vario from barometer) ------------------
+
+@Composable
+private fun VarioPage() {
+    val sc = LocalScale.current
+    val state by VarioState.state.collectAsState()
+    val vSpeed = state.verticalSpeedMps
+    val absV = kotlin.math.abs(vSpeed)
+
+    // Colour intensity scales with magnitude — green for climb, red for sink,
+    // grey near zero. Caps at ±5 m/s for visual range.
+    val numberColor = when {
+        vSpeed >= 0.1f -> {
+            val t = (absV / 5f).coerceIn(0f, 1f)
+            Color(
+                red = 0.4f - 0.4f * t,
+                green = 0.7f + 0.3f * t,
+                blue = 0.2f * (1f - t),
+            )
+        }
+        vSpeed <= -0.1f -> {
+            val t = (absV / 5f).coerceIn(0f, 1f)
+            Color(
+                red = 0.7f + 0.3f * t,
+                green = 0.3f * (1f - t),
+                blue = 0.3f * (1f - t),
+            )
+        }
+        else -> Color.Gray
+    }
+
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = sc.pagePadding),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("VARIO", color = Color.Gray,
+                fontSize = sc.labelSize, fontWeight = FontWeight.SemiBold)
+
+            Spacer(Modifier.height(sc.cardSpacing))
+
+            // Big vertical speed readout
+            val sign = when {
+                vSpeed >= 0.1f -> "+"
+                vSpeed <= -0.1f -> ""
+                else -> ""
+            }
+            Text("$sign${"%.1f".format(vSpeed)}",
+                color = numberColor,
+                fontSize = sc.bigNumberSize,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace)
+            Text("m/s", color = Color.Gray, fontSize = sc.unitSize)
+
+            Spacer(Modifier.height(sc.cardSpacing))
+
+            // Altitude
+            Text("ALT  ${state.altitudeM.toInt()} m",
+                color = Color.White,
+                fontSize = sc.bodySize,
+                fontFamily = FontFamily.Monospace)
+            Text("${"%.1f".format(state.pressureHpa)} hPa",
+                color = Color.Gray, fontSize = sc.mutedSize)
+
+            Spacer(Modifier.height(sc.sectionSpacing))
+
+            // Start/Stop audio button. Big, tappable, contrast colour reflects state.
+            val btnBg = if (state.audioOn) Color(0xFFEF5350) else Color(0xFF66BB6A)
+            val btnLabel = if (state.audioOn) "STOP" else "START"
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(btnBg)
+                    .clickable { VarioState.setAudioOn(!state.audioOn) }
+                    .padding(horizontal = (24f * sc.factor).dp,
+                             vertical = (8f * sc.factor).dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(btnLabel, color = Color.White,
+                    fontSize = sc.statusSize, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+// -- Page 2: PPG -------------------------------------------------------------
 
 @Composable
 private fun PpgPage(s: WatchStats.Snapshot) {
@@ -341,7 +437,16 @@ private fun MotionPage(s: WatchStats.Snapshot) {
             Text(" m/s²", color = Color.Gray, fontSize = sc.mutedSize,
                 modifier = Modifier.padding(bottom = sc.cardSpacing))
         }
-        Text("${s.accRateHz.format1()} Hz", color = Color.Gray, fontSize = sc.mutedSize)
+        Text("acc ${s.accRateHz.format1()}Hz · gyro ${s.gyroRateHz.format1()}Hz",
+            color = Color.Gray, fontSize = sc.mutedSize)
+
+        Spacer(Modifier.height(sc.sectionSpacing))
+
+        Text("GYRO (rad/s)", color = Color.Gray,
+            fontSize = sc.labelSize, fontWeight = FontWeight.SemiBold)
+        StatRow("X", s.gyroX.format2(), Color.White)
+        StatRow("Y", s.gyroY.format2(), Color.White)
+        StatRow("Z", s.gyroZ.format2(), Color.White)
 
         Spacer(Modifier.height(sc.sectionSpacing))
 
@@ -471,7 +576,114 @@ private fun BiaPage(s: WatchStats.Snapshot) {
     }
 }
 
-// -- Page 7: BLE bandwidth + counters ---------------------------------------
+// -- Page 7: Ambient (barometer + magnetometer + light) --------------------
+
+@Composable
+private fun AmbientPage(s: WatchStats.Snapshot) {
+    val sc = LocalScale.current
+    PageColumn {
+        Text("AMBIENT", color = Color.White,
+            fontSize = sc.titleSize, fontWeight = FontWeight.SemiBold)
+
+        Spacer(Modifier.height(sc.cardSpacing))
+
+        // Pressure + altitude
+        Text("PRESSURE", color = Color.Gray,
+            fontSize = sc.labelSize, fontWeight = FontWeight.SemiBold)
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(if (s.pressureHpa > 0f) s.pressureHpa.format1() else "—",
+                color = Color.White,
+                fontSize = sc.smallNumberSize, fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace)
+            Text(" hPa", color = Color.Gray, fontSize = sc.mutedSize,
+                modifier = Modifier.padding(bottom = sc.cardSpacing))
+        }
+        if (s.pressureHpa > 0f) {
+            Text("alt ${s.altitudeM.format1()} m", color = Color.Gray, fontSize = sc.mutedSize)
+        }
+
+        Spacer(Modifier.height(sc.cardSpacing))
+
+        // Light
+        Text("LIGHT", color = Color.Gray,
+            fontSize = sc.labelSize, fontWeight = FontWeight.SemiBold)
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(if (s.ambientLux > 0f) s.ambientLux.toInt().toString() else "—",
+                color = Color.White,
+                fontSize = sc.smallNumberSize, fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace)
+            Text(" lux", color = Color.Gray, fontSize = sc.mutedSize,
+                modifier = Modifier.padding(bottom = sc.cardSpacing))
+        }
+
+        Spacer(Modifier.height(sc.cardSpacing))
+
+        // Magnetometer
+        Text("MAGNETIC (µT)", color = Color.Gray,
+            fontSize = sc.labelSize, fontWeight = FontWeight.SemiBold)
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(if (s.magMagnitudeUt > 0f) s.magMagnitudeUt.format1() else "—",
+                color = Color.White,
+                fontSize = sc.smallNumberSize, fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace)
+            Text(" total", color = Color.Gray, fontSize = sc.mutedSize,
+                modifier = Modifier.padding(bottom = sc.cardSpacing))
+        }
+    }
+}
+
+// -- Page 8: GPS / GNSS ----------------------------------------------------
+
+@Composable
+private fun GpsPage(s: WatchStats.Snapshot) {
+    val sc = LocalScale.current
+    PageColumn {
+        Text("GPS", color = Color.White,
+            fontSize = sc.titleSize, fontWeight = FontWeight.SemiBold)
+
+        val stateColor = when {
+            s.gpsFixed -> Color(0xFF66BB6A)
+            s.gpsState == "searching…" -> Color(0xFFFFA726)
+            else -> Color(0xFFEF5350)
+        }
+        Text(s.gpsState, color = stateColor,
+            fontSize = sc.statusSize, fontWeight = FontWeight.Bold)
+
+        Spacer(Modifier.height(sc.cardSpacing))
+
+        if (s.gpsFixed || s.gpsLat != 0.0) {
+            // Lat / Lon
+            Text("LOCATION", color = Color.Gray,
+                fontSize = sc.labelSize, fontWeight = FontWeight.SemiBold)
+            Text("%.5f°".format(s.gpsLat), color = Color.White,
+                fontSize = sc.bodySize, fontFamily = FontFamily.Monospace)
+            Text("%.5f°".format(s.gpsLon), color = Color.White,
+                fontSize = sc.bodySize, fontFamily = FontFamily.Monospace)
+
+            Spacer(Modifier.height(sc.cardSpacing))
+
+            // Speed and bearing
+            StatRow("Speed", "%.1f m/s".format(s.gpsSpeedMps), Color.White)
+            StatRow("km/h", "%.1f".format(s.gpsSpeedMps * 3.6f), Color.White)
+            StatRow("Bearing", "%.0f°".format(s.gpsBearingDeg), Color.White)
+
+            Spacer(Modifier.height(sc.cardSpacing))
+
+            // Altitude and accuracy
+            StatRow("Alt", "%.0f m".format(s.gpsAltitudeM), Color.White)
+            StatRow("±", "%.1f m".format(s.gpsAccuracyM),
+                if (s.gpsAccuracyM < 10f) Color(0xFF66BB6A) else Color.White)
+            StatRow("Sats", "${s.gpsSatellitesUsed}/${s.gpsSatellitesVisible}",
+                Color.White)
+        } else {
+            Text("waiting for fix…", color = Color.Gray, fontSize = sc.mutedSize)
+            Text("${s.gpsSatellitesVisible} satellites visible",
+                color = Color.Gray, fontSize = sc.mutedSize)
+        }
+    }
+}
+
+// -- Page 9: BLE bandwidth + counters ---------------------------------------
 
 @Composable
 private fun BlePage(s: WatchStats.Snapshot) {
@@ -494,6 +706,7 @@ private fun BlePage(s: WatchStats.Snapshot) {
         StatRow("HR", s.hrRateHz.format1(), Color.White)
         StatRow("ACC", s.accRateHz.format1(), Color.White)
         StatRow("EDA", s.edaRateHz.format1(), Color.White)
+        StatRow("GYRO", s.gyroRateHz.format1(), Color.White)
     }
 }
 

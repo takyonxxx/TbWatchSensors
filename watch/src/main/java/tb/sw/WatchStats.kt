@@ -1,6 +1,7 @@
 package tb.sw
 
 import tb.sw.shared.SensorProtocol.BiaPacket
+import tb.sw.shared.SensorProtocol.GpsPacket
 import tb.sw.shared.SensorProtocol.MfBiaPacket
 import tb.sw.shared.SensorProtocol.SpO2Packet
 import tb.sw.shared.SensorProtocol.SweatPacket
@@ -67,6 +68,25 @@ object WatchStats {
 
         // On-demand: Sweat loss
         val sweatLossGrams: Float = 0f, val sweatStatus: Int = -1,
+
+        // Standard Android sensors (not Samsung SDK)
+        val gyroX: Float = 0f, val gyroY: Float = 0f, val gyroZ: Float = 0f,
+        val gyroRateHz: Float = 0f,
+        val magX: Float = 0f, val magY: Float = 0f, val magZ: Float = 0f,
+        val magMagnitudeUt: Float = 0f,
+        val pressureHpa: Float = 0f, val altitudeM: Float = 0f,
+        val ambientLux: Float = 0f,
+
+        // GPS / GNSS
+        val gpsState: String = "off",
+        val gpsLat: Double = 0.0, val gpsLon: Double = 0.0,
+        val gpsAltitudeM: Float = 0f,
+        val gpsSpeedMps: Float = 0f,
+        val gpsBearingDeg: Float = 0f,
+        val gpsAccuracyM: Float = 0f,
+        val gpsSatellitesVisible: Int = 0,
+        val gpsSatellitesUsed: Int = 0,
+        val gpsFixed: Boolean = false,
 
         // Bandwidth
         val bytesPerSec: Int = 0, val totalPackets: Long = 0,
@@ -173,6 +193,45 @@ object WatchStats {
         update { copy(sweatLossGrams = p.sweatLossGrams, sweatStatus = p.status) }
     }
 
+    // -- Standard Android sensor callbacks ---------------------------------
+
+    @Volatile private var gyroCount: Long = 0
+    private var lastGyroCount: Long = 0
+
+    fun onGyroSample(x: Float, y: Float, z: Float) {
+        gyroCount++
+        update { copy(gyroX = x, gyroY = y, gyroZ = z) }
+    }
+
+    fun onMagSample(x: Float, y: Float, z: Float) {
+        val mag = kotlin.math.sqrt(x * x + y * y + z * z)
+        update { copy(magX = x, magY = y, magZ = z, magMagnitudeUt = mag) }
+    }
+
+    fun onBaroSample(hpa: Float, altitudeM: Float) {
+        update { copy(pressureHpa = hpa, altitudeM = altitudeM) }
+    }
+
+    fun onLightSample(lux: Float) {
+        update { copy(ambientLux = lux) }
+    }
+
+    fun onGpsSample(p: GpsPacket) {
+        update {
+            copy(
+                gpsState = if (p.fixed) "fixed" else "no fix",
+                gpsLat = p.latitudeDeg,
+                gpsLon = p.longitudeDeg,
+                gpsAltitudeM = p.altitudeM,
+                gpsSpeedMps = p.speedMps,
+                gpsBearingDeg = p.bearingDeg,
+                gpsAccuracyM = p.accuracyM,
+                gpsSatellitesUsed = p.satellitesUsed,
+                gpsFixed = p.fixed,
+            )
+        }
+    }
+
     fun addBytes(n: Int) { bytesSent += n }
 
     /** Per-second rate computation. */
@@ -185,19 +244,22 @@ object WatchStats {
         val hrPerSec = (hrCount - lastHrCount) / dtSec
         val accPerSec = (accCount - lastAccCount) / dtSec
         val edaPerSec = (edaCount - lastEdaCount) / dtSec
+        val gyroPerSec = (gyroCount - lastGyroCount) / dtSec
         val bps = ((bytesSent - lastBytes) / dtSec).toInt()
 
         lastWindowMs = now
         lastPpgCount = ppgCount; lastHrCount = hrCount
         lastAccCount = accCount; lastEdaCount = edaCount
+        lastGyroCount = gyroCount
         lastBytes = bytesSent
 
         update {
             copy(
                 ppgRateHz = ppgPerSec, hrRateHz = hrPerSec,
                 accRateHz = accPerSec, edaRateHz = edaPerSec,
+                gyroRateHz = gyroPerSec,
                 bytesPerSec = bps,
-                totalPackets = ppgCount + hrCount + accCount + edaCount,
+                totalPackets = ppgCount + hrCount + accCount + edaCount + gyroCount,
                 uptimeSec = uptimeSec,
             )
         }

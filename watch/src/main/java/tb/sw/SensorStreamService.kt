@@ -51,14 +51,24 @@ class SensorStreamService : Service() {
 
     /** Returned to the Activity when it binds. UI uses this to acquire/release. */
     inner class LocalBinder : Binder() {
-        fun acquireUi() = bridge.acquire(OWNER_UI)
-        fun releaseUi() = bridge.release(OWNER_UI)
+        fun acquireUi() {
+            bridge.acquire(OWNER_UI)
+            androidBridge.acquire(OWNER_UI)
+            gpsBridge.acquire(OWNER_UI)
+        }
+        fun releaseUi() {
+            bridge.release(OWNER_UI)
+            androidBridge.release(OWNER_UI)
+            gpsBridge.release(OWNER_UI)
+        }
     }
 
     private val binder = LocalBinder()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private lateinit var bridge: SamsungSensorBridge
+    private lateinit var androidBridge: AndroidSensorBridge
+    private lateinit var gpsBridge: GpsBridge
     private lateinit var gatt: SensorGattServer
     private var wakeLock: PowerManager.WakeLock? = null
 
@@ -81,6 +91,8 @@ class SensorStreamService : Service() {
         }
 
         bridge = SamsungSensorBridge(this)
+        androidBridge = AndroidSensorBridge(this)
+        gpsBridge = GpsBridge(this)
         gatt = SensorGattServer(this).apply {
             commandListener = ::handleCommand
         }
@@ -160,6 +172,7 @@ class SensorStreamService : Service() {
         super.onDestroy()
         continuousJob?.cancel()
         ondemandJob?.cancel()
+        runCatching { tb.sw.vario.VarioState.audio.release() }
         bridge.disconnect()
         gatt.stop()
         runCatching { wakeLock?.takeIf { it.isHeld }?.release() }
@@ -193,11 +206,15 @@ class SensorStreamService : Service() {
     private fun bleStart() {
         sessionId++
         bridge.acquire(OWNER_BLE)
+        androidBridge.acquire(OWNER_BLE)
+        gpsBridge.acquire(OWNER_BLE)
         Log.i(TAG, "BLE central started streaming, session=$sessionId")
     }
 
     private fun bleStop() {
         bridge.release(OWNER_BLE)
+        androidBridge.release(OWNER_BLE)
+        gpsBridge.release(OWNER_BLE)
         Log.i(TAG, "BLE central stopped streaming")
     }
 
@@ -210,6 +227,16 @@ class SensorStreamService : Service() {
             launch { bridge.accFlow.collectLatest { gatt.notifyAcc(it.toBytes()) } }
             launch { bridge.tempFlow.collectLatest { gatt.notifyTemp(it.toBytes()) } }
             launch { bridge.edaFlow.collectLatest { gatt.notifyEda(it.toBytes()) } }
+            launch { androidBridge.gyroFlow.collectLatest { gatt.notifyGyro(it.toBytes()) } }
+            launch { androidBridge.magFlow.collectLatest { gatt.notifyMag(it.toBytes()) } }
+            launch {
+                androidBridge.baroFlow.collectLatest { pkt ->
+                    gatt.notifyBaro(pkt.toBytes())
+                    tb.sw.vario.VarioState.onPressureSample(pkt.pressureHpa)
+                }
+            }
+            launch { androidBridge.lightFlow.collectLatest { gatt.notifyLight(it.toBytes()) } }
+            launch { gpsBridge.gpsFlow.collectLatest { gatt.notifyGps(it.toBytes()) } }
         }
     }
 

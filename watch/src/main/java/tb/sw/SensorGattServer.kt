@@ -77,6 +77,11 @@ class SensorGattServer(private val context: Context) {
     fun notifyMfBia(bytes: ByteArray) = notify(SensorProtocol.CHAR_MFBIA_UUID, bytes)
     fun notifySpO2(bytes: ByteArray) = notify(SensorProtocol.CHAR_SPO2_UUID, bytes)
     fun notifySweat(bytes: ByteArray) = notify(SensorProtocol.CHAR_SWEAT_UUID, bytes)
+    fun notifyGyro(bytes: ByteArray) = notify(SensorProtocol.CHAR_GYRO_UUID, bytes)
+    fun notifyMag(bytes: ByteArray) = notify(SensorProtocol.CHAR_MAG_UUID, bytes)
+    fun notifyBaro(bytes: ByteArray) = notify(SensorProtocol.CHAR_BARO_UUID, bytes)
+    fun notifyLight(bytes: ByteArray) = notify(SensorProtocol.CHAR_LIGHT_UUID, bytes)
+    fun notifyGps(bytes: ByteArray) = notify(SensorProtocol.CHAR_GPS_UUID, bytes)
     fun notifyStatus(bytes: ByteArray) = notify(SensorProtocol.CHAR_STATUS_UUID, bytes)
 
     private fun notify(charUuid: java.util.UUID, bytes: ByteArray) {
@@ -113,6 +118,12 @@ class SensorGattServer(private val context: Context) {
             SensorProtocol.CHAR_MFBIA_UUID,
             SensorProtocol.CHAR_SPO2_UUID,
             SensorProtocol.CHAR_SWEAT_UUID,
+            // Standard Android sensors
+            SensorProtocol.CHAR_GYRO_UUID,
+            SensorProtocol.CHAR_MAG_UUID,
+            SensorProtocol.CHAR_BARO_UUID,
+            SensorProtocol.CHAR_LIGHT_UUID,
+            SensorProtocol.CHAR_GPS_UUID,
             // Status
             SensorProtocol.CHAR_STATUS_UUID,
         )) {
