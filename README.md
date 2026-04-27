@@ -47,10 +47,11 @@ Write a single byte to characteristic `7b1d0006-…`:
 
 ## Watch UI
 
-Eight-page horizontal pager, swipe left/right:
+Eleven-page horizontal pager, swipe left/right:
 
 ```
-[Status] → [PPG] → [Heart] → [Motion+Temp] → [EDA+SpO2] → [ECG+Sweat] → [BIA] → [BLE]
+[Status] → [Vario] → [PPG] → [Heart] → [Motion] → [EDA+SpO2]
+        → [ECG+Sweat] → [BIA] → [Ambient] → [GPS] → [BLE]
 ```
 
 Auto-scaling layout adjusts typography and spacing based on the screen
@@ -60,21 +61,40 @@ scale (Watch 8 40 mm); 480 dp = 1.11 ×; emulator "Small Round" 360 dp = 0.83 ×
 ## Architecture
 
 ```
-+----------------------------------+
-|  Galaxy Watch 8 (Wear OS 5)      |
-|                                  |
-|  Samsung Health Sensor SDK       |
-|     ↓ ConnectionListener +       |        BLE GATT custom UUIDs
-|       TrackerEventListener       |  ----------------------------->  any BLE central
-|     ↓                            |   PPG / HR / ACC / Temp / EDA
-|  SamsungSensorBridge             |   + ECG / BIA / MF-BIA /
-|     ↓ Kotlin Flow per data type  |     SpO2 / Sweat
-|  SensorStreamService             |
-|     ↓ collectLatest →            |
-|  SensorGattServer (peripheral)   |
-|                                  |
-|  Compose dashboard, 8 pages      |
-+----------------------------------+
++-----------------------------------+
+|  Galaxy Watch 8 (Wear OS 5)       |
+|                                   |
+|  Samsung Health Sensor SDK        |
+|     ↓ ConnectionListener +        |        BLE GATT custom UUIDs
+|       TrackerEventListener        |  ----------------------------->  any BLE central
+|     ↓                             |   PPG / HR / ACC / Temp / EDA
+|  SamsungSensorBridge              |   + ECG / BIA / MF-BIA /
+|                                   |     SpO2 / Sweat
+|  Android SensorManager            |   + Gyro / Mag / Baro / Light
+|     ↓                             |   + GPS
+|  AndroidSensorBridge              |
+|                                   |
+|  LocationManager + GnssStatus     |
+|     ↓                             |
+|  GpsBridge                        |
+|                                   |
+|  All bridges reference-counted    |
+|  (UI / BLE owners), idle when     |
+|  no owner — zero power draw.      |
+|                                   |
+|     ↓ Kotlin Flow per data type   |
+|  SensorStreamService              |
+|     ↓ collectLatest →             |
+|  SensorGattServer (peripheral)    |
+|                                   |
+|  Variometer (barometric)          |
+|     ↑ baroFlow tap                |
+|     ↓ vertical-speed (m/s)        |
+|  VarioAudioEngine                 |
+|     → AudioTrack PCM_FLOAT        |
+|                                   |
+|  Compose dashboard, 11 pages      |
++-----------------------------------+
 ```
 
 ## Files
@@ -83,13 +103,22 @@ scale (Watch 8 40 mm); 480 dp = 1.11 ×; emulator "Small Round" 360 dp = 0.83 ×
 - `watch/libs/samsung-health-sensor-api-1.4.1.aar` — partner-approval-only SDK
 - `watch/src/main/AndroidManifest.xml`
 - `watch/src/main/java/tb/sw/`
-    - `SamsungSensorBridge.kt` — SDK wrapper, all 10 trackers
-    - `SensorGattServer.kt` — BLE GATT peripheral, 11 characteristics
-    - `SensorStreamService.kt` — foreground service, command dispatcher
+    - `SamsungSensorBridge.kt` — SDK wrapper, all 10 Samsung trackers
+    - `AndroidSensorBridge.kt` — gyroscope, magnetometer, barometer, light
+    - `GpsBridge.kt` — GNSS / GPS via LocationManager + GnssStatus
+    - `SensorGattServer.kt` — BLE GATT peripheral, 16 characteristics
+    - `SensorStreamService.kt` — foreground service, command dispatcher,
+      reference-counted sensor lifecycle
     - `WatchStats.kt` — singleton state holder
-    - `presentation/MainActivity.kt` — Compose UI, 8-page pager,
+    - `presentation/MainActivity.kt` — Compose UI, 11-page pager,
       auto-scaling for any round Wear OS screen
     - `shared/SensorProtocol.kt` — UUID constants and packet formats
+    - `vario/`
+        - `Variometer.kt` — barometric altitude → vertical speed
+          with two-stage IIR filtering
+        - `VarioAudioEngine.kt` — synthesised paragliding-vario tone,
+          AudioTrack-based, harmonic-rich timbre
+        - `VarioState.kt` — singleton glue, StateFlow for UI
 
 ## Behavior
 
@@ -97,14 +126,75 @@ scale (Watch 8 40 mm); 480 dp = 1.11 ×; emulator "Small Round" 360 dp = 0.83 ×
    wake lock.
 2. `SamsungSensorBridge.connect()` connects to Samsung Health Tracking
    Service. Trackers stay off.
-3. `SensorGattServer.start()` registers the GATT service, advertises it.
-4. **Everything is idle** until a central writes a command. No sensor
-   draw, no BLE traffic on the data characteristics.
-5. On `0x01` (start streaming): all five continuous trackers start;
-   data fans out to PPG/HR/ACC/Temp/EDA characteristics.
-6. On `0x10`–`0x14` (on-demand): the matching tracker starts; result
-   arrives on its dedicated characteristic; tracker auto-stops.
-7. On `0x02`: continuous trackers stop, advertising continues.
+3. `AndroidSensorBridge` and `GpsBridge` are constructed but idle.
+4. `SensorGattServer.start()` registers the GATT service, advertises it.
+5. **Sensors are off** until either the UI binds (foreground page) or
+   a BLE central writes `0x01` (start streaming). Reference-counted
+   ownership means a tracker runs as long as *any* owner holds it,
+   stops only when both UI and BLE release.
+6. On `0x01` (start streaming): all continuous trackers start
+   (5 Samsung + 4 Android sensors + GPS); data fans out to the
+   matching characteristics.
+7. On `0x10`–`0x14` (on-demand): the matching Samsung tracker starts;
+   result arrives on its dedicated characteristic; tracker auto-stops.
+8. On `0x02`: continuous trackers stop, advertising continues.
+9. The barometer flow is also tapped by the variometer. Pressure
+   samples flow to both the BLE Baro characteristic and the on-watch
+   variometer page in parallel.
+
+---
+
+## Variometer
+
+The watch doubles as a paragliding / soaring variometer: the kind
+of audible pulsing-tone instrument pilots use to detect lift while
+flying. It uses the watch's barometric pressure sensor, with no
+external hardware.
+
+**Signal pipeline:**
+
+```
+pressure (hPa)
+    → altitude (m)            via ICAO troposphere formula
+    → low-pass filter         IIR, τ ≈ 200 ms (smooths sensor noise)
+    → derivative              vertical speed = Δalt / Δt
+    → low-pass filter         IIR, τ ≈ 400 ms (smooths the derivative)
+    → ±5 cm/s deadband        kills jitter while at rest
+```
+
+The two-stage filter is a standard hobby-vario design. Filtering
+altitude alone would delay lift detection too much; filtering the
+derivative alone would be jumpy. The combination gives both quick
+response and a clean reading.
+
+**Audio engine** (`VarioAudioEngine.kt`):
+
+- AudioTrack PCM_FLOAT mono 44.1 kHz, 1024-frame buffer,
+  MAX_PRIORITY render thread
+- Carrier: harmonic-rich "piezo buzzer" timbre —
+  `1.0·sin(φ) + 0.55·sin(3φ) + 0.25·sin(5φ) + 0.05·sin(2φ)`
+- **Climb tone:** pitch glides 700 → 1600 Hz over 0..6 m/s climb;
+  cadence 2.5 → 8 Hz (faster pulsing as climb gets stronger);
+  cosine attack/release ramps so there are no clicks between beeps.
+- **Sink alarm:** continuous 200 Hz drone with 2.2 Hz FM vibrato
+  ±40 Hz, same harmonic timbre.
+- **Dead band** between climb and sink thresholds is silent, so
+  level flight produces no sound.
+
+The audio behaviour is a direct port from a tested iOS/Swift
+variometer — same constants, same envelope, same harmonic mix.
+
+**Vario page:**
+
+- Big vertical-speed readout in m/s — green for climb, red for sink,
+  colour intensity scales with magnitude
+- Altitude (m) and pressure (hPa) underneath
+- **START / STOP button** at the bottom toggles audio. Visual
+  feedback only continues whether or not audio is on.
+
+The variometer also works on the ground for testing — small height
+changes (raising the wrist by ~0.5 m) produce visible m/s
+deflections.
 
 ---
 
@@ -190,6 +280,11 @@ on Galaxy Watch 8:
 | EDA continuous | ~25 Hz (varies by device) |
 | ECG on-demand | ~500 Hz during ~30 s session |
 | SpO2 on-demand | one final reading after ~30 s |
+| Gyroscope (Android) | ~16 Hz (SENSOR_DELAY_UI) |
+| Magnetometer (Android) | ~16 Hz |
+| Barometer (Android) | ~5–25 Hz, device-dependent |
+| Light (Android) | event-driven, on change |
+| GPS / GNSS | ~1 Hz when fixed (dual-band L1+L5) |
 
 Aggregate BLE bandwidth during full streaming: ~1.5 kB/s (well below
 BLE practical limits).
