@@ -194,6 +194,55 @@ on Galaxy Watch 8:
 Aggregate BLE bandwidth during full streaming: ~1.5 kB/s (well below
 BLE practical limits).
 
+---
+
+## Research roadmap
+
+Things to do once a Galaxy Watch 8 is in hand and the app is streaming
+real data. None of these run on the watch itself — the watch is a
+data source. Heavy lifting happens in Python on a laptop receiving
+the BLE stream.
+
+**A) HRV pipeline (easiest first step)**
+PPG → peak detection → RR-interval extraction → time-domain metrics
+(RMSSD, SDNN) and frequency-domain metrics (LF/HF). 5-minute sessions
+plus all-day trend. ~1 day of work to get a Python prototype using
+`heartpy` or `neurokit2`.
+
+**B) Sleep staging**
+Record PPG + ACC + skin-temperature overnight, train a sleep-stage
+classifier using `yasa` or `sleepecg`. For ground truth, cross-check
+against another sleep tracker or a clinical-grade device.
+
+**C) Autonomic nervous system monitoring**
+Stress, meditation, athletic recovery. Built on top of the HRV
+pipeline. Multiple short measurements through the day; track trend
+vs. self-reported state.
+
+**D) Thermal / local perfusion**
+Hot shower, cold exposure, pre-/post-exercise microcirculation
+changes. Captures both PPG amplitude shifts and skin-temperature
+shifts simultaneously. Requires a controlled lab-style protocol.
+
+**E) Respiratory biofeedback**
+Extract respiration rate from PPG amplitude/period modulation, give
+the user a visual or audio cue (slow breathing trainer, anxiety
+management, meditation aid). Could integrate with the existing
+audio engine.
+
+**F) Long-term personal baseline**
+Months of daily 5-minute measurements at the same time. Learn the
+person's individual normal. Detect anomalies — early-illness signal,
+fatigue, post-exercise recovery quality.
+
+Suggested first steps: skip computing on-device for at least the
+first two weeks. Just record raw PPG/HR/ACC/Temp to a laptop via
+BLE, write to parquet/CSV, build up a dataset. Start exploration in
+a Jupyter notebook with `matplotlib`, `scipy.signal`, and
+`neurokit2` (which provides ~30 ready-made PPG metrics).
+
+---
+
 ## Disclaimers
 
 This software exposes raw sensor signals. It does not infer or
