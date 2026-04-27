@@ -293,16 +293,14 @@ BLE practical limits).
 
 ## Research roadmap
 
-Things to do once a Galaxy Watch 8 is in hand and the app is streaming
-real data. None of these run on the watch itself — the watch is a
-data source. Heavy lifting happens in Python on a laptop receiving
-the BLE stream.
+Directions for working with the streamed data. None of these run on
+the watch itself — the watch is a data source. Signal processing
+happens in Python on a host receiving the BLE stream.
 
 **A) HRV pipeline (easiest first step)**
 PPG → peak detection → RR-interval extraction → time-domain metrics
 (RMSSD, SDNN) and frequency-domain metrics (LF/HF). 5-minute sessions
-plus all-day trend. ~1 day of work to get a Python prototype using
-`heartpy` or `neurokit2`.
+plus all-day trend. Python prototype using `heartpy` or `neurokit2`.
 
 **B) Sleep staging**
 Record PPG + ACC + skin-temperature overnight, train a sleep-stage
@@ -330,10 +328,9 @@ Months of daily 5-minute measurements at the same time. Learn the
 person's individual normal. Detect anomalies — early-illness signal,
 fatigue, post-exercise recovery quality.
 
-Suggested first steps: skip computing on-device for at least the
-first two weeks. Just record raw PPG/HR/ACC/Temp to a laptop via
-BLE, write to parquet/CSV, build up a dataset. Start exploration in
-a Jupyter notebook with `matplotlib`, `scipy.signal`, and
+Suggested approach: skip on-device computation. Record raw
+PPG/HR/ACC/Temp via BLE, write to parquet/CSV, build up a dataset.
+Explore in a Jupyter notebook with `matplotlib`, `scipy.signal`, and
 `neurokit2` (which provides ~30 ready-made PPG metrics).
 
 ---
